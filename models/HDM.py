@@ -244,7 +244,7 @@ class DR_Net_phy(torch.nn.Module):
         res1 = x
         x = self.conv2(x)
         res2 = x
-        x = self.FAB(x)
+
         x = self.FAB(x)
 
         x_dcn1 = self.dcn_block(x)
