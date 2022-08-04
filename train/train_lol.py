@@ -2,7 +2,7 @@ import sys
 sys.path.append("..")
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 
 import torch,sys,torchvision,argparse
@@ -43,11 +43,11 @@ print('model_name:',model_name)
 #2022464:dcnv2dcp2ffa
 models_={
     # 1062   net
-    'ffa':TANet()
+    'TA_LOL':TANet()
 
 }
 loaders_={
-    'its_train':Rain_train_loader,
+    'its_train':LL_train_loader,
     'its_test':ALL_test_loader,
 
 }
@@ -169,7 +169,7 @@ def test(net,loader_test,max_psnr,max_ssim,step):
         type = clear_name[0].split('_')[0]
         if type == 'did':
             continue
-        if type == 'lowlight':
+        if type == 'rain':
             continue
         if type == 'hazy':
             continue

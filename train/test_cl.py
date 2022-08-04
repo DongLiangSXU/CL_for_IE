@@ -49,6 +49,9 @@ models_={
     'depthnet':NormDepth(iskt=False),
     # 'rnet':RNet(32,3),
     'HDM':DR_Net_phy(3,3),
+    'TA':TANet(),
+    'PRE':PReNet(opt=opt),
+
 }
 
 loaders_={
@@ -142,8 +145,8 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
         print('train from scratch *** ')
 
     with torch.no_grad():
-        testnature(net)
-        # ssim_eval,psnr_eval = test(net,loader_test, '')
+        # nomasktest(net)
+        ssim_eval,psnr_eval = test(net,loader_test, '')
 
         # testnature(net,'')
     exit(-1)
@@ -156,8 +159,8 @@ def testnature(net):
 
     #    naturepath = '/home/lyd16/PycharmProjects/wangbin_Project/data/track1.2_test_sample/'
     #    naturepath = './realrain/'
-    naturepath = '/home/lyd16/PycharmProjects/rttk_test/'
-    imgsavepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/real_test/redehaze/'
+    naturepath = '/home/lyd16/PycharmProjects/wangbin_Project/Zero-DCE_extension-main/Zero-DCE++/data/test_data/DICM_/'
+    imgsavepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/TAtest/lowlight/'
     names=os.listdir(naturepath)
 
 
@@ -184,7 +187,7 @@ def testnature(net):
         oinput = inputmap
         oinput = torch.unsqueeze(oinput, dim=0)
         oinput = oinput.to(opt.device)
-        inputmap = tfs.Normalize(mean=[0.64, 0.6, 0.58], std=[0.14, 0.15, 0.152])(inputmap)
+        # inputmap = tfs.Normalize(mean=[0.64, 0.6, 0.58], std=[0.14, 0.15, 0.152])(inputmap)
         inputmap = torch.unsqueeze(inputmap, dim=0)
         ohaze = inputmap
         ohaze = ohaze.to(opt.device)
@@ -195,6 +198,49 @@ def testnature(net):
 
         vutils.save_image(dehazemap.cpu(),
                           imgsavepath+hname)
+
+
+def nomasktest(net):
+
+    net.eval()
+    torch.cuda.empty_cache()
+
+    #    naturepath = '/home/lyd16/PycharmProjects/wangbin_Project/data/track1.2_test_sample/'
+    #    naturepath = './realrain/'
+    naturepath = '/home/lyd16/PycharmProjects/wangbin_Project/Zero-DCE_extension-main/Zero-DCE++/data/test_data/DICM_/'
+    imgsavepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/TAtest/lowlight/'
+    names=os.listdir(naturepath)
+
+
+    for hname in names:
+        filename = naturepath+hname
+        # filename = '/home/lyd16/PycharmProjects/wangbin_Project/data/track1.2_test_sample/0.png'
+        #        imgsavepath = '/home/lyd16/PycharmProjects/wangbin_Project/FFA-Net-master/net/rainre/masksave/'
+
+        img = pi.open(filename).convert('RGB')
+
+        sizei = img.size
+        h,w = (sizei[0]//4)*4,(sizei[1]//4)*4
+        if h>=960 or w>=960:
+            continue
+        print(h,w)
+        img = img.resize((h,w),pi.ANTIALIAS)
+
+
+        inputmap = tfs.ToTensor()(img)
+
+        # inputmap = tfs.Normalize(mean=[0.64, 0.6, 0.58], std=[0.14, 0.15, 0.152])(inputmap)
+        inputmap = torch.unsqueeze(inputmap, dim=0)
+        ohaze = inputmap
+        ohaze = ohaze.to(opt.device)
+        #        ohaze = torch.pow(ohaze,0.45)
+        dehazemap,_ = net(ohaze)
+        dehazemap = torch.clamp(dehazemap,0,1)
+        tshow = torch.cat([ohaze,dehazemap],dim=0)
+
+        vutils.save_image(tshow.cpu(),
+                          imgsavepath+hname)
+#
 #
 def test(net,loader_test,imgsavepath):
     net.eval()
@@ -253,8 +299,8 @@ def test(net,loader_test,imgsavepath):
         # show = torch.cat([dehazemap, ohaze, y], dim=0)
         # vutils.save_image(derain_re.cpu(),imgsavepath+clear_name[0])
 
-    print('did:--',np.mean(ssimsdid) ,'---',np.mean(psnrsdid),'---','hazy:--',np.mean(ssimshazy) ,'---',np.mean(psnrshazy), \
-          '---','rain:--',np.mean(ssimsrain) ,np.mean(psnrsrain),'---','lol:--',np.mean(ssimslowlight) ,np.mean(psnrslowlight))
+        print('did:--',np.mean(ssimsdid) ,'---',np.mean(psnrsdid),'---','hazy:--',np.mean(ssimshazy) ,'---',np.mean(psnrshazy), \
+              '---','rain:--',np.mean(ssimsrain) ,np.mean(psnrsrain),'---','lol:--',np.mean(ssimslowlight) ,np.mean(psnrslowlight))
     return np.mean(ssims),np.mean(psnrs)
 
 from collections import OrderedDict
@@ -290,20 +336,23 @@ if __name__ == "__main__":
     seednums = [20,30,40,50,60]
     seednum=seednums[0]
     setup_seed(seednum)
+    # nettype = 'conv_b'
+    nettype = 'HDM'
 
-    net=models_['HDM']
+    if nettype == 'trans_b':
+        net = models_['PRE']
+    else:
+        net=models_['HDM']
     net=net.to(opt.device)
 
-    depthnet = models_['depthnet']
-    depthnet = depthnet.to(opt.device)
+    # depthnet = models_['depthnet']
+    # depthnet = depthnet.to(opt.device)
 
     if opt.device=='cuda':
         net=torch.nn.DataParallel(net)
         cudnn.benchmark=True
 
-    # net.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works'
-    #                                '/CR_image_enhancement/train_test/HDM_ddd/pth_save/95000/sl_hdm_super_95000.pth'))
-
+    net.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/FFA-Net-master/net/trained_models/its_train_ffa_3_329.pk')['model'])
 
     parts = []
     # num_params = 0

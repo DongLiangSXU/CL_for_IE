@@ -49,6 +49,7 @@ models_={
     'depthnet':NormDepth(iskt=False),
     # 'rnet':RNet(32,3),
     'HDM':DR_Net_phy(3,3),
+    'HDM_pre':DR_Net_phy(3,3),
 }
 
 loaders_={
@@ -114,15 +115,76 @@ def lr_schedule_cosdecay(t,T,init_lr=opt.lr):
 
 
 
-def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc,pre_parms,criterion):
+def train(net,rain_loader, loader_test,haze_loader, low_loader,optim, optim_ewc,pre_parms,criterion):
     losses=[]
     start_step=0
     max_ssim=0
     max_psnr=0
     ssims=[]
     psnrs=[]
-    # crloss = ContrastLoss()
+    crloss = ContrastLoss(opt)
     # syslowlightmodel = sys_lowlight.get_model()
+
+
+
+
+
+    # step2:calcaluate grds
+    pre_parms = pre_parms.to(opt.device)
+    grads = torch.zeros_like(pre_parms)
+    grads_savepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/' \
+                     'CR_image_enhancement/import_npy_file/hdm_rain2haze_cl.npy'
+
+    loader_train = rain_loader
+    print(len(loader_train))
+
+    load_importance = True
+    if load_importance:
+        load_grd = np.load(grads_savepath)
+        load_grd = torch.from_numpy(load_grd)
+        load_grd = load_grd.to(opt.device)
+        grads=grads+load_grd
+    else:
+        net.train()
+        for k in range(len(loader_train)):
+            print(k)
+            x,y,_,mask,fname = next(iter(loader_train))
+            rclear=y.to(opt.device)
+            rain = x.to(opt.device)
+            mask = mask.to(opt.device)
+            odata = _.to(opt.device)
+            derain_re = net(rain,mask)
+            loss_nf = criterion[0](derain_re,rclear)
+            loss2=criterion[1](derain_re,rclear)
+            loss=loss_nf+0.04*loss2
+
+            loss.backward()
+            optim_ewc.step()
+
+
+            tempgard = []
+            for name, parms in net.module.named_parameters():
+                flatten = parms.grad.view(-1)
+                flatten = torch.abs(flatten)*1000
+                # print(torch.mean(flatten))
+                tempgard.append(flatten)
+            sgard = torch.cat(tempgard)
+            grads = grads+sgard
+
+            optim_ewc.zero_grad()
+
+        grads = grads/len(loader_train)
+        grad_np = grads.cpu().detach().numpy()
+        np.save(grads_savepath,grad_np)
+
+    grads = grads.to(opt.device)
+    print(torch.max(grads))
+
+    # exit(-1)
+
+    replay_ratio = [0,0,0,0,0,1,1,1,1,1]
+
+    print('-----------------------ewc prepare done!--------------------------------')
 
     # loss_function = nn.CrossEntropyLoss()
     if opt.resume and os.path.exists(opt.model_dir):
@@ -141,48 +203,15 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
     else :
         print('train from scratch *** ')
 
-    # with torch.no_grad():
-    #     ssim_eval,psnr_eval = test(net,loader_test, '')
-    #     # testnature(net,'')
-    # #
-    # exit(-1)
-
-    # step2:calcaluate grds
-    pre_parms = pre_parms.to(opt.device)
-    grads = torch.zeros_like(pre_parms)
-    print(len(loader_train))
-    for k in range(len(loader_train)):
-        x,y,_,mask,fname = next(iter(loader_train))
-        rclear=y.to(opt.device)
-        rain = x.to(opt.device)
-        mask = mask.to(opt.device)
-        odata = _.to(opt.device)
-        derain_re = net(rain,mask)
-        loss_nf = criterion[0](derain_re,rclear)
-        loss2=criterion[1](derain_re,rclear)
-        loss=loss_nf+0.04*loss2
-
-        loss.backward()
-        optim_ewc.step()
 
 
-        tempgard = []
-        for name, parms in net.module.named_parameters():
-            flatten = parms.grad.view(-1)
-            flatten = torch.abs(flatten)*1000
-            # print(torch.mean(flatten))
-            tempgard.append(flatten)
-        sgard = torch.cat(tempgard)
-        grads = grads+sgard
-
-        optim_ewc.zero_grad()
-    grads = grads/len(loader_train)
-    grads = grads.to(opt.device)
-    print(torch.max(grads))
-
-    replay_ratio = [0,0,1,1]
-
-    print('-----------------------ewc prepare done!--------------------------------')
+#     with torch.no_grad():
+#         ssim_eval,psnr_eval = test(net,loader_test, '')
+# # #     # testnature(net,'')
+# # # #
+#     exit(-1)
+#     max_ssim=0.93445
+#     max_psnr=32.385
 
     # cl_for_lowlight
     totrain_loader = haze_loader
@@ -194,33 +223,66 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
             for param_group in optim.param_groups:
                 param_group["lr"] = lr
 
+        # if step % 3 == 0:
+        #     isreplay = 1
+        # else:
+        #     isreplay = 0
         isreplay = random.choice(replay_ratio)
         if isreplay or step % opt.eval_step ==0:
             x,y,_,mask,fname = next(iter(loader_train))
+
+
+            low_inputs = x.to(opt.device)
+            clear = y.to(opt.device)
+            mask = mask.to(opt.device)
+            odata = _.to(opt.device)
+
+            # with torch.no_grad():
+            #     s1 = prenet(low_inputs,mask)
+
+            derain_re = net(low_inputs,mask)
+
+            # s2  = prenet()
+
+            pos_sample = clear
+            neg_sample = odata
+            anchor = derain_re
+
+            pixelloss = criterion[0](derain_re,clear)
+            loss2=criterion[1](derain_re,clear)
+            pixelloss=pixelloss+0.04*loss2
+
         else:
             x,y,_,mask,fname = next(iter(totrain_loader))
 
-        low_inputs = x.to(opt.device)
-        clear = y.to(opt.device)
-        mask = mask.to(opt.device)
-        odata = _.to(opt.device)
+            low_inputs = x.to(opt.device)
+            clear = y.to(opt.device)
+            mask = mask.to(opt.device)
+            odata = _.to(opt.device)
+
+            # with torch.no_grad():
+            #     s1 = prenet(low_inputs,mask)
+                # vutils.save_image(s1.cpu(),'./derainnet_outdehaze.png')
+                # exit(-1)
+
+            derain_re = net(low_inputs,mask)
+
+            pos_sample = clear
+            neg_sample = odata
+            anchor = derain_re
+
+            pixelloss = criterion[0](derain_re,clear)
+            loss2=criterion[1](derain_re,clear)
+            pixelloss=pixelloss+0.04*loss2
 
 
-        # vutils.save_image(low_inputs.cpu(),'./hazerainin.png')
-        # exit(-1)
-
-        derain_re = net(low_inputs,mask)
-
-        pixelloss = criterion[0](derain_re,clear)
-        loss2=criterion[1](derain_re,clear)
-        pixelloss=pixelloss+0.04*loss2
 
         # a: dehaze
         # p: gt
         # n: haze
-        # mycrloss = crloss(derain_re.contiguous(),clear.contiguous(),low_inputs.contiguous())
+        mycrloss = 0.5*crloss(anchor.contiguous(),pos_sample.contiguous(),neg_sample.contiguous())
 
-        final_loss = 1*pixelloss
+        final_loss = 1*pixelloss+mycrloss
 
         currentparm = []
         currentparms = torch.zeros_like(pre_parms)
@@ -230,7 +292,7 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
             # flatten = flatten*flatten
             # flatten = torch.abs(flatten)
             currentparm.append(flatten)
-            currentparms = torch.cat(currentparm)
+        currentparms = torch.cat(currentparm)
 
 
         noforgetloss = 10000*torch.mean(torch.mul(grads,torch.abs(currentparms-pre_parms)))
@@ -245,11 +307,11 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
         optim.step()
         optim.zero_grad()
 
-        if step%250==0:
-            toshow = torch.cat([low_inputs,derain_re,clear])
-            vutils.save_image(toshow.cpu(),'/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/tempshow/'+str(step)+'show.png')
+        # if step%250==0:  |{(mycrloss.item()):.5f}
+        #     toshow = torch.cat([low_inputs,derain_re,clear])
+        #     vutils.save_image(toshow.cpu(),'/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/tempshow/'+str(step)+'show.png')
 
-        print(f'\rtrain loss : {totalloss.item():.5f}|{(pixelloss.item()):.5f}|{(noforgetloss.item()):.5f}|'
+        print(f'\rtrain loss : {totalloss.item():.5f}|{(pixelloss.item()):.5f}|{(noforgetloss.item()):.5f}|{isreplay}|'
               f'step :{step}/{opt.steps}|lr :{lr :.7f} |time_used :{(time.time()-start_time)/60 :.1f}',
               end='',flush=True)
 
@@ -258,8 +320,8 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
             with torch.no_grad():
                 # ssim_eval,psnr_eval,ssim_eval2,psnr_eval2,ssim_eval3,psnr_eval3 = test(net,loader_test, max_psnr,max_ssim,step)
 
-                pthpath = './HDM_dd/pth_save/'+str(step)+'/'
-                imgsavepath = './HDM_dd/imgsave/' + str(step) + '/'
+                pthpath = './HDM_dd_new_hr/pth_save/'+str(step)+'/'
+                imgsavepath = './HDM_dd_new_hr/imgsave/' + str(step) + '/'
                 if not os.path.exists(pthpath):
                     os.makedirs(pthpath)
                 if not os.path.exists(imgsavepath):
@@ -296,16 +358,16 @@ def test(net,loader_test,imgsavepath):
     # rnet.eval()
 
     torch.cuda.empty_cache()
-    ssimshazy=[0]
-    psnrshazy=[0]
-    ssimsdid=[0]
-    psnrsdid=[0]
-    ssimslowlight=[0]
-    psnrslowlight=[0]
-    ssimsrain=[0]
-    psnrsrain=[0]
-    ssims = [0]
-    psnrs = [0]
+    ssimshazy=[]
+    psnrshazy=[]
+    ssimsdid=[]
+    psnrsdid=[]
+    ssimslowlight=[]
+    psnrslowlight=[]
+    ssimsrain=[]
+    psnrsrain=[]
+    ssims = []
+    psnrs = []
 
     for i ,(lowq,clear,_,mask,clear_name) in enumerate(loader_test):
 
@@ -345,12 +407,16 @@ def test(net,loader_test,imgsavepath):
         #     psnrslowlight.append(psnr1)
         ssims.append(ssim1)
         psnrs.append(psnr1)
-        # show = torch.cat([dehazemap, ohaze, y], dim=0)
-        # vutils.save_image(derain_re.cpu(),imgsavepath+clear_name[0])
+        # show = torch.cat([derain_re, odata, y,lowq], dim=0)
+        # vutils.save_image(show.cpu(),'./testshow.png')
+        # exit(-1)
 
     print('did:--',np.mean(ssimsdid) ,'---',np.mean(psnrsdid),'---','hazy:--',np.mean(ssimshazy) ,'---',np.mean(psnrshazy), \
           '---','rain:--',np.mean(ssimsrain) ,np.mean(psnrsrain),'---','lol:--',np.mean(ssimslowlight) ,np.mean(psnrslowlight))
-    return np.mean(ssims),np.mean(psnrs)
+    mssims = (np.mean(ssimsrain)+np.mean(ssimshazy))/2
+    mpsnrs = (np.mean(psnrsrain)+np.mean(psnrshazy))/2
+    # print(mssims,mpsnrs)
+    return mssims,mpsnrs
 
 from collections import OrderedDict
 def load_checkpoint(model, weights):
@@ -388,16 +454,21 @@ if __name__ == "__main__":
 
     net=models_['HDM']
     net=net.to(opt.device)
-
-    depthnet = models_['depthnet']
-    depthnet = depthnet.to(opt.device)
+    prenet = models_['HDM_pre']
+    prenet = prenet.to(opt.device)
+    # depthnet = models_['depthnet']
+    # depthnet = depthnet.to(opt.device)
 
     if opt.device=='cuda':
         net=torch.nn.DataParallel(net)
+        prenet=torch.nn.DataParallel(prenet)
         # rnet = torch.nn.DataParallel(rnet)
         cudnn.benchmark=True
 
     net.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/FFA-Net-master/net/trained_models/its_train_ffa_3_329.pk')['model'])
+    prenet.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/FFA-Net-master/net/trained_models/its_train_ffa_3_329.pk')['model'])
+    # net.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/FFA-Net-master/net/trained_models/its_train_ffa_3_3212.pk')['model'])
+    # prenet.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/FFA-Net-master/net/trained_models/its_train_ffa_3_3212.pk')['model'])
 
 
 
@@ -408,10 +479,6 @@ if __name__ == "__main__":
     #     print(num_params / 1e6)
     for para in net.module.parameters():
         flatten = para.view(-1)
-        # flatten = flatten*flatten*100
-
-        # flatten = torch.abs(flatten)
-        # print(flatten)
         parts.append(flatten)
     pre_parms = torch.cat(parts)
 
@@ -425,8 +492,11 @@ if __name__ == "__main__":
             param.requires_grad = False
         criterion.append(PerLoss(vgg_model).to(opt.device))
 
+        for parm in prenet.parameters():
+            parm.requires_grad = False
+
     optimizer = optim.Adam(itertools.chain(net.parameters()),lr=opt.lr, betas = (0.9, 0.999), eps=1e-08)
-    optimizer_ewc = optim.Adam(itertools.chain(net.parameters()),lr=0.000001, betas = (0.9, 0.999), eps=1e-08)
+    optimizer_ewc = optim.Adam(itertools.chain(net.parameters()),lr=0.000000, betas = (0.9, 0.999), eps=1e-08)
 
     optimizer.zero_grad()
     optimizer_ewc.zero_grad()

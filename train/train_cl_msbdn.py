@@ -2,7 +2,7 @@ import sys
 sys.path.append("..")
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,3'
 
 
 import torch,sys,torchvision,argparse
@@ -21,12 +21,14 @@ from torch.utils.data import DataLoader
 import torchvision.utils as vutils
 warnings.filterwarnings('ignore')
 from option import opt,model_name,log_dir
-from data_utils import *
+from data_load_rain import *
 from torchvision.models import vgg16
 print('log_dir :',log_dir)
 print('model_name:',model_name)
 from skimage.color import rgb2hsv
-
+# from nngeometry.metrics import FIM
+# from nngeometry.object import PMatKFAC, PMatDiag, PVector
+# from nngeometry.layercollection import LayerCollection
 import torch
 from torch.utils.data import DataLoader
 from copy import deepcopy
@@ -34,6 +36,8 @@ from torch.nn import functional as F
 from tqdm.notebook import tqdm
 
 
+# 3_1_pre  cr+recall+ewc+memory_loss
+# 3_2_pre  cr+recall+ewc
 def gradient(y):
 
     gradient_h = torch.abs(y[:, :, :, :-1] - y[:, :, :, 1:])
@@ -46,9 +50,8 @@ models_={
     # 'mynet':BSnet(32,3),
     'depthnet':NormDepth(iskt=False),
     # 'rnet':RNet(32,3),
-    'SUPHDM':DR_Net_phy(3,3),
-    'HDM':DR_Net_phy(3,3),
-
+    'MSBDN':PReNet(opt=opt),
+    'P_PRE':PReNet(opt=opt),
 }
 
 loaders_={
@@ -114,17 +117,69 @@ def lr_schedule_cosdecay(t,T,init_lr=opt.lr):
 
 
 
-def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc,pre_parms,criterion):
+def train(net,rain_loader, loader_test,haze_loader, low_loader,optim, optim_ewc,pre_parms,criterion):
     losses=[]
     start_step=0
     max_ssim=0
     max_psnr=0
     ssims=[]
     psnrs=[]
-    # crloss = ContrastLoss(opt)
+    crloss = ContrastLoss(opt)
     # syslowlightmodel = sys_lowlight.get_model()
 
     # loss_function = nn.CrossEntropyLoss()
+    loader_train = haze_loader
+
+
+    # step2:calcaluate grds
+    pre_parms = pre_parms.to(opt.device)
+    grads = torch.zeros_like(pre_parms)
+    grads_savepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works' \
+                     '/CR_image_enhancement/import_npy_file/msbdn_haze2rain_cl.npy'
+
+
+    load_importance = True
+    if load_importance:
+        load_grd = np.load(grads_savepath)
+        load_grd = torch.from_numpy(load_grd)
+        load_grd = load_grd.to(opt.device)
+        grads=grads+load_grd
+    else:
+        net.train()
+        loader_train = haze_loader
+        # step2:calcaluate grds
+        pre_parms = pre_parms.to(opt.device)
+        grads = torch.zeros_like(pre_parms)
+        print(len(loader_train))
+        for k in range(len(loader_train)):
+            print(k)
+            x,y,fname = next(iter(loader_train))
+            rclear=y.to(opt.device)
+            rain = x.to(opt.device)
+            derain_re = net(rain)
+            loss_nf = criterion[0](derain_re,rclear)
+            loss2=criterion[1](derain_re,rclear)
+            loss=loss_nf+0.04*loss2
+            loss.backward()
+            optim_ewc.step()
+            tempgard = []
+            for name, parms in net.module.named_parameters():
+                flatten = parms.grad.view(-1)
+                flatten = torch.abs(flatten)*1000
+                # print(torch.mean(flatten))
+                tempgard.append(flatten)
+            sgard = torch.cat(tempgard)
+            grads = grads+sgard
+
+            optim_ewc.zero_grad()
+        grads = grads/len(loader_train)
+        grad_np = grads.cpu().detach().numpy()
+        np.save(grads_savepath,grad_np)
+
+    grads = grads.to(opt.device)
+    print(torch.max(grads))
+    # exit(-1)
+
     if opt.resume and os.path.exists(opt.model_dir):
         print(f'resume from {opt.model_dir}')
         ckp=torch.load(opt.model_dir)
@@ -141,54 +196,20 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
     else :
         print('train from scratch *** ')
 
-    with torch.no_grad():
-        ssim_eval,psnr_eval = test(net,loader_test, '')
-        # testnature(net)
-    #
-    exit(-1)
+    replay_ratio = [0,0,0,0,0,0,0,1,1,1]
+    # replay_ratio = [0]
 
-    # step2:calcaluate grds
-    pre_parms = pre_parms.to(opt.device)
-    grads = torch.zeros_like(pre_parms)
-    # print(len(loader_train)+len(haze_loader))
-    # for k in range(len(loader_train)+len(haze_loader)):
-    #     # print(k)
-    #
-    #     if k >= len(loader_train):
-    #         x, y, _, mask, fname = next(iter(haze_loader))
-    #     else:
-    #         x, y, _, mask, fname = next(iter(loader_train))
-    #
-    #     rclear=y.to(opt.device)
-    #     rain = x.to(opt.device)
-    #     mask = mask.to(opt.device)
-    #     odata = _.to(opt.device)
-    #     derain_re = net(rain,mask)
-    #     loss_nf = criterion[0](derain_re,rclear)
-    #     loss2=criterion[1](derain_re,rclear)
-    #     loss=loss_nf+0.04*loss2
-    #     loss.backward()
-    #     optim_ewc.step()
-    #     tempgard = []
-    #     for name, parms in net.module.named_parameters():
-    #         flatten = parms.grad.view(-1)
-    #         flatten = torch.abs(flatten)*1000
-    #         # print(torch.mean(flatten))
-    #         tempgard.append(flatten)
-    #     sgard = torch.cat(tempgard)
-    #     grads = grads+sgard
-    #
-    #     optim_ewc.zero_grad()
-    # grads = grads/(len(loader_train)+len(hazeloader))
-    grads = grads.to(opt.device)
-    print(torch.max(grads))
-
-    replay_ratio = [0]
 
     print('-----------------------ewc prepare done!--------------------------------')
 
-    # cl_for_hazerain
-    totrain_loader = haze_loader
+#     with torch.no_grad():
+#         ssim_eval,psnr_eval = test(net,loader_test, '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/real_test/msbdn_rain200/')
+#         # testnature(net)
+# #
+#     exit(-1)
+
+    # cl_for_lowlight
+    totrain_loader = rain_loader
     for step in range(start_step+1,opt.steps+1):
         net.train()
         lr=opt.lr
@@ -197,92 +218,70 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
             for param_group in optim.param_groups:
                 param_group["lr"] = lr
 
-        # data-prepare
         isreplay = random.choice(replay_ratio)
-        if isreplay>0:
-            if isreplay == 1:
-                # orgin_haze
-                x,y,ox,mask,fname = next(iter(totrain_loader))
-            else:
-                # orgin_rain
-                x, y, ox, mask, fname = next(iter(loader_train))
+        if isreplay :
+            x,y,fname = next(iter(loader_train))
+            low_inputs = x.to(opt.device)
+            clear = y.to(opt.device)
+
+            # with torch.no_grad():
+            #     s1 = prenet(low_inputs)
+
+            derain_re = net(low_inputs)
+
+            # with torch.no_grad():
+            #     s2 = prenet(derain_re)
+
+            # pos_sample = s1
+            # neg_sample = low_inputs
+            # anchor = derain_re
+
+            pixelloss = criterion[0](derain_re,clear)
+            loss2=criterion[1](derain_re,clear)
+            pixelloss=pixelloss+0.04*loss2
 
         else:
-            # orgin_hard_rain
-            x, y, ox, mask, fname = next(iter(loader_train))
-            y = y.to(opt.device)
-            ox = ox.to(opt.device)
-            x = x.to(opt.device)
-            # addhaze
-            with torch.no_grad():
-                _, hazerain = make_haze(y, ox, depthnet)
+            x,y,fname = next(iter(totrain_loader))
+            low_inputs = x.to(opt.device)
+            clear = y.to(opt.device)
 
-            # addrain
-            rainmaps = []
-            odatamaps = []
-            masks = []
-            for idx in range(y.shape[0]):
-                s_rain = hazerain[idx:idx+1,:,:,:]
-                srainmap = add_rain.add_rain(s_rain)
-                odatamaps.append(srainmap)
+            # with torch.no_grad():
+            #     s1 = prenet(low_inputs)
 
-                makemask = srainmap.cpu().detach().numpy()[0]
-                makemask = np.transpose(makemask,(1,2,0))
-                makemask = pi.fromarray((makemask*255).astype('uint8'))
-                maskfortest = depth_get_mask(makemask, 5)
-                maskfortest = torch.unsqueeze(maskfortest, dim=0)
-                maskfortest = maskfortest.to(opt.device)
-                masks.append(maskfortest)
+            derain_re = net(low_inputs)
 
-                srainmap = torch.squeeze(srainmap,dim=0)
-                normdata = tfs.Normalize(mean=[0.64, 0.6, 0.58], std=[0.14, 0.15, 0.152])(srainmap)
-                srainmap = torch.unsqueeze(normdata,dim=0)
-                rainmaps.append(srainmap)
+            # with torch.no_grad():
+            #     s2 = prenet(derain_re)
+            #
+            # pos_sample = clear
+            # neg_sample = low_inputs
+            # anchor = derain_re
 
+            pixelloss = criterion[0](derain_re,clear)
+            loss2=criterion[1](derain_re,clear)
+            pixelloss=pixelloss+0.04*loss2
 
-            rainmap = torch.cat(rainmaps,dim=0)
-            rainmap = rainmap.to(opt.device)
-            x = rainmap
-
-            omap = torch.cat(odatamaps, dim=0)
-            omap = omap.to(opt.device)
-            ox = omap
-
-            mask = torch.cat(masks, dim=0)
-            mask = mask.to(opt.device)
-
-
-        low_inputs = x.to(opt.device)
-        clear = y.to(opt.device)
-        mask = mask.to(opt.device)
-        odata = ox.to(opt.device)
-
-        derain_re = net(low_inputs,mask)
-
-        pixelloss = criterion[0](derain_re,clear)
-        loss2=criterion[1](derain_re,clear)
-        pixelloss=pixelloss+0.04*loss2
-
+        # vutils.save_image(low_inputs.cpu(),'./hazerainin.png')
+        # exit(-1)
         # a: dehaze
         # p: gt
         # n: haze
-        # mycrloss = crloss(derain_re.contiguous(),clear.contiguous(),odata.contiguous())
+        # mycrloss = 0.5*crloss(anchor.contiguous(),pos_sample.contiguous(),neg_sample.contiguous())
 
         final_loss = 1*pixelloss
 
         # currentparm = []
-        # currentparms = torch.zeros_like(pre_parms)
-        # currentparms = currentparms.to(opt.device)
         # for name, parms in net.module.named_parameters():
         #     flatten = parms.view(-1)
         #     # flatten = flatten*flatten
         #     # flatten = torch.abs(flatten)
         #     currentparm.append(flatten)
-        #     currentparms = torch.cat(currentparm)
+        # currentparms = torch.cat(currentparm)
+        # currentparms = currentparms.to(opt.device)
         #
         #
         # noforgetloss = 10000*torch.mean(torch.mul(grads,torch.abs(currentparms-pre_parms)))
-        # noforgetloss = 10000*(torch.sum(torch.mul(grads, torch.abs(currentparms - pre_parms)))
+        # # noforgetloss = 10000*(torch.sum(torch.mul(grads, torch.abs(currentparms - pre_parms)))
         #                       +torch.pow(torch.sum(torch.mul(grads, torch.abs(currentparms - pre_parms))),2))
 
 
@@ -293,28 +292,31 @@ def train(net,loader_train, loader_test,haze_loader, low_loader,optim, optim_ewc
         optim.step()
         optim.zero_grad()
 
-        # if step%250==0:
-        #     toshow = torch.cat([odata,derain_re,clear])
-        #     vutils.save_image(toshow.cpu(),'/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/supshow/'+str(step)+'show.png')
+        # if step%250==0: |{(mycrloss.item()):.5f}
+        #     toshow = torch.cat([low_inputs,derain_re,clear])
+        #     vutils.save_image(toshow.cpu(),'/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/TAshow/'+str(step)+'show.png')
 
-        print(f'\rtrain loss : {totalloss.item():.5f}|{(pixelloss.item()):.5f}|'
+        print(f'\rtrain loss : {totalloss.item():.5f}|{(pixelloss.item()):.5f}|{isreplay}|'
               f'step :{step}/{opt.steps}|lr :{lr :.7f} |time_used :{(time.time()-start_time)/60 :.1f}',
               end='',flush=True)
+        # print(f'\rtrain loss : {totalloss.item():.5f}|{(pixelloss.item()):.5f}|{(noforgetloss.item()):.5f}|'
+        #       f'step :{step}/{opt.steps}|lr :{lr :.7f} |time_used :{(time.time()-start_time)/60 :.1f}',
+        #       end='',flush=True)
 
 
         if step % opt.eval_step ==0 :
             with torch.no_grad():
                 # ssim_eval,psnr_eval,ssim_eval2,psnr_eval2,ssim_eval3,psnr_eval3 = test(net,loader_test, max_psnr,max_ssim,step)
 
-                pthpath = './HDM_only_sup/pth_save/'+str(step)+'/'
-                imgsavepath = './HDM_only_sup/imgsave/' + str(step) + '/'
+                pthpath = './MSBDN_noewc/pth_save/'+str(step)+'/'
+                imgsavepath = './MSBDN_noewc/imgsave/' + str(step) + '/'
                 if not os.path.exists(pthpath):
                     os.makedirs(pthpath)
                 if not os.path.exists(imgsavepath):
                     os.makedirs(imgsavepath)
                 ssim_eval, psnr_eval = test(net,loader_test,imgsavepath)
                 # testnature(net,imgsavepath)
-                torch.save(net.state_dict(), '%s/sl_hdm_super_%d.pth' % (pthpath, step))
+                torch.save(net.state_dict(), '%s/Pre_dd_nm_%d.pth' % (pthpath, step))
                 # torch.save(rnet.state_dict(),'%s/r_net_%d.pth' % (pthpath, step))
 
             # print(f'\nstep :{0} |ssim:{ssim_eval:.4f}| psnr:{psnr_eval:.4f}|ssim2:{ssim_eval2:.4f}| psnr2:{psnr_eval2:.4f}|ssim3:{ssim_eval3:.4f}| psnr3:{psnr_eval3:.4f}|max_ssim:{max_ssim:.4f}| max_psnr:{max_psnr:.4f}')
@@ -355,7 +357,7 @@ def test(net,loader_test,imgsavepath):
     ssims = []
     psnrs = []
 
-    for i ,(lowq,clear,_,mask,clear_name) in enumerate(loader_test):
+    for i ,(lowq,clear,clear_name) in enumerate(loader_test):
 
         type = clear_name[0].split('_')[0]
         if type == 'did':
@@ -366,15 +368,16 @@ def test(net,loader_test,imgsavepath):
             # continue
             flagnum = clear_name[0].split('_')[1]
             flagnum = int(flagnum.split('.')[0])
+
             if flagnum>500:
                 continue
+        # print(lowq.shape,clear_name)
+            # print(lowq.shape,flagnum)
+
 
         lowq = lowq.to(opt.device)
-        odata = _.to(opt.device)
-        # if type == 'lowlight':
-        #     lowq = odata
-        mask = mask.to(opt.device)
-        derain_re = net(lowq,mask)
+
+        derain_re = net(lowq)
         y = clear.to(opt.device)
         ssim1=ssim(derain_re,y).item()
         psnr1=psnr(derain_re,y)
@@ -389,18 +392,22 @@ def test(net,loader_test,imgsavepath):
         if type == 'hazy':
             ssimshazy.append(ssim1)
             psnrshazy.append(psnr1)
+        # print(np.mean(ssimsrain) ,'---',np.mean(psnrsrain))
         # if type == 'lowlight':
         #     ssimslowlight.append(ssim1)
         #     psnrslowlight.append(psnr1)
+
         ssims.append(ssim1)
         psnrs.append(psnr1)
+        # print(ssim1,psnr1)
         # show = torch.cat([dehazemap, ohaze, y], dim=0)
         # vutils.save_image(derain_re.cpu(),imgsavepath+clear_name[0])
 
-        print('did:--',np.mean(ssimsdid) ,'---',np.mean(psnrsdid),'---','hazy:--',np.mean(ssimshazy) ,'---',np.mean(psnrshazy), \
-              '---','rain:--',np.mean(ssimsrain) ,np.mean(psnrsrain),'---','lol:--',np.mean(ssimslowlight) ,np.mean(psnrslowlight))
-    return np.mean(ssims),np.mean(psnrs)
-
+    print('did:--',np.mean(ssimsdid) ,'---',np.mean(psnrsdid),'---','hazy:--',np.mean(ssimshazy) ,'---',np.mean(psnrshazy), \
+          '---','rain:--',np.mean(ssimsrain) ,np.mean(psnrsrain),'---','lol:--',np.mean(ssimslowlight) ,np.mean(psnrslowlight))
+    mssims = (np.mean(ssimsrain)+np.mean(ssimshazy))/2
+    mpsnrs = (np.mean(psnrsrain)+np.mean(psnrshazy))/2
+    return mssims,mpsnrs
 
 from torchvision.transforms import functional as FF
 from PIL import Image as pi
@@ -411,7 +418,7 @@ def testnature(net):
     #    naturepath = '/home/lyd16/PycharmProjects/wangbin_Project/data/track1.2_test_sample/'
     #    naturepath = './realrain/'
     naturepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/realtest/'
-    imgsavepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/real_test/onlysup/'
+    imgsavepath = '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/real_test/msbdn/'
     names=os.listdir(naturepath)
 
 
@@ -423,29 +430,18 @@ def testnature(net):
         img = pi.open(filename).convert('RGB')
 
         sizei = img.size
-        h,w = (sizei[0]//4)*4,(sizei[1]//4)*4
+        h,w = (sizei[0]//16)*16,(sizei[1]//16)*16
         img = img.resize((h,w),pi.ANTIALIAS)
-        # if h>3000 or w>3000:
-        #     continue
-        #        img = FF.crop(img,0,0,w,h)
-        # img = img.resize((300,400),pi.ANTIALIAS)
-        maskfortest = depth_get_mask(img,5)
-        maskfortest = torch.unsqueeze(maskfortest, dim=0)
-        maskfortest = maskfortest.to(opt.device)
-        # print(img.size)
-        # exit(-1)
+        print(img.size)
+
         inputmap = tfs.ToTensor()(img)
-        oinput = inputmap
-        oinput = torch.unsqueeze(oinput, dim=0)
-        oinput = oinput.to(opt.device)
-        inputmap = tfs.Normalize(mean=[0.64, 0.6, 0.58], std=[0.14, 0.15, 0.152])(inputmap)
         inputmap = torch.unsqueeze(inputmap, dim=0)
         ohaze = inputmap
         ohaze = ohaze.to(opt.device)
         #        ohaze = torch.pow(ohaze,0.45)
-        dehazemap = net(ohaze,maskfortest)
+        dehazemap = net(ohaze)
         dehazemap = torch.clamp(dehazemap,0,1)
-        tshow = torch.cat([oinput,dehazemap],dim=0)
+        # tshow = torch.cat([oinput,dehazemap],dim=0)
 
         vutils.save_image(dehazemap.cpu(),
                           imgsavepath+hname)
@@ -481,24 +477,30 @@ if __name__ == "__main__":
     lowloader = LL_train_loader
     loader_test=loaders_[opt.testset]
 
+    test_pkl = '/home/lyd16/PycharmProjects/wangbin_Project/MSBDN-DFF-master/model.pkl'
+
+    msbdn = torch.load(test_pkl, map_location=lambda storage, loc: storage)
+    msbdn = msbdn.to(opt.device)
+    prenet = torch.load(test_pkl, map_location=lambda storage, loc: storage)
+    prenet = prenet.to(opt.device)
+    # torch.save(model.state_dict(), '/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/msbdn.pth')
+
     seednums = [20,30,40,50,60]
     seednum=seednums[0]
     setup_seed(seednum)
 
-    net=models_['HDM']
-    net=net.to(opt.device)
-
-    depthnet = models_['depthnet']
-    depthnet = depthnet.to(opt.device)
 
     if opt.device=='cuda':
-        net=torch.nn.DataParallel(net)
+        net=torch.nn.DataParallel(msbdn)
+        prenet=torch.nn.DataParallel(prenet)
         # rnet = torch.nn.DataParallel(rnet)
         cudnn.benchmark=True
 
-    # net.load_state_dict(torch.load('/home/lyd16/PycharmProjects/wangbin_Project/AAAI2023works/CR_image_enhancement/train_test/trained_models/its_train_HDM_3_2.pk')['model'])
     parts = []
-
+    # num_params = 0
+    # for param in net.module.parameters():
+    #     num_params += param.numel()
+    #     print(num_params / 1e6)
     for para in net.module.parameters():
         flatten = para.view(-1)
         # flatten = flatten*flatten*100
@@ -518,8 +520,11 @@ if __name__ == "__main__":
             param.requires_grad = False
         criterion.append(PerLoss(vgg_model).to(opt.device))
 
+    for parm in prenet.parameters():
+        parm.requires_grad = False
+
     optimizer = optim.Adam(itertools.chain(net.parameters()),lr=opt.lr, betas = (0.9, 0.999), eps=1e-08)
-    optimizer_ewc = optim.Adam(itertools.chain(net.parameters()),lr=0.000001, betas = (0.9, 0.999), eps=1e-08)
+    optimizer_ewc = optim.Adam(itertools.chain(net.parameters()),lr=0.000000, betas = (0.9, 0.999), eps=1e-08)
 
     optimizer.zero_grad()
     optimizer_ewc.zero_grad()

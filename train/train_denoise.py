@@ -2,7 +2,7 @@ import sys
 sys.path.append("..")
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 
 
 import torch,sys,torchvision,argparse
@@ -19,7 +19,7 @@ from torch import nn
 import torchvision.utils as vutils
 warnings.filterwarnings('ignore')
 from option import opt,model_name,log_dir
-from data_load_rain import *
+from noise_dataload import *
 from torchvision.models import vgg16
 print('log_dir :',log_dir)
 print('model_name:',model_name)
@@ -43,12 +43,12 @@ print('model_name:',model_name)
 #2022464:dcnv2dcp2ffa
 models_={
     # 1062   net
-    'ffa':TANet()
+    'TAnoise':TANet()
 
 }
 loaders_={
-    'its_train':Rain_train_loader,
-    'its_test':ALL_test_loader,
+    'its_train':Noise_train_loader,
+    'its_test':Noise_test_loader,
 
 }
 start_time=time.time()
@@ -166,13 +166,6 @@ def test(net,loader_test,max_psnr,max_ssim,step):
 
     for i ,(lowq,clear,clear_name) in enumerate(loader_test):
 
-        type = clear_name[0].split('_')[0]
-        if type == 'did':
-            continue
-        if type == 'lowlight':
-            continue
-        if type == 'hazy':
-            continue
 
         lowq = lowq.to(opt.device)
 
@@ -203,7 +196,7 @@ if __name__ == "__main__":
     num_params = 0
     seednums = [20,30,40,50,60]
     seednum=seednums[0]
-    setup_seed(seednum)
+    # setup_seed(seednum)
 
     if opt.device=='cuda':
         net=torch.nn.DataParallel(net)
